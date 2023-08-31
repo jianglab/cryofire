@@ -116,7 +116,6 @@ class CryoFIRE(nn.Module):
                 latent_variables_dict[key] = conf_dict[key]
         pose_dict = self.pose_regressor(shared_features, in_dict)
         for key in pose_dict:
-
             latent_variables_dict[key] = pose_dict[key]
         return latent_variables_dict
 
