@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-import utils
+from src import utils
 
 log = utils.log
 vlog = utils.vlog

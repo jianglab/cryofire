@@ -24,6 +24,7 @@ from src.losses import symmetric_loss, kl_divergence_conf
 from src.models import CryoFIRE
 from src.lie_tools import select_predicted_latent
 from src.mask import CircularMask, FrequencyMarchingMask
+from src.helical_tools import nce_loss
 
 log = utils.log
 vlog = utils.vlog
@@ -39,15 +40,18 @@ def dict_to_args(config_dict):
 
 
 class Trainer:
-    def __init__(self, config_dict):
+    def __init__(self, config_dict,path):
         args = dict_to_args(config_dict)
         log(args)
 
-        args.outdir = os.path.join(main_dir, args.outdir)
+        # args.outdir = os.path.join(main_dir, args.outdir)
+        args.outdir = args.outdir
         # output directory
         if args.outdir is not None and not os.path.exists(args.outdir):
             os.makedirs(args.outdir)
 
+        os.system(f'cp {path} {args.outdir}/{path}')
+        log(f'copy to {args.outdir}/{path}')
         # load poses
         if args.pose is not None:
             assert os.path.exists(args.pose)
@@ -176,7 +180,6 @@ class Trainer:
             self.model.train()
         else:
             self.start_epoch = 0
-
         # dataloaders
         self.data_generator = DataLoader(self.data, batch_size=args.batch_size, shuffle=True,
                                          num_workers=args.num_workers,
@@ -209,6 +212,12 @@ class Trainer:
         self.use_kl_divergence = True
         if args.z_dim == 0 or not args.variational_het or args.beta_conf < 1e-8:
             self.use_kl_divergence = False
+
+        # helical args
+        self.helical_path = args.helical_path
+        self.helix_neighbor = None
+        if args.helical_path is not None:
+            self.helix_neighbor = np.load(args.helical_path, allow_pickle=True)
 
         # placeholders for predicted latent variables
         self.predicted_rots = np.empty((self.n_img_dataset, 3, 3))
@@ -264,9 +273,27 @@ class Trainer:
             self.current_batch_images_count = 0
 
             end_time = time.time()
+            t_epoch = dt.now()
             in_dict = {}
+
+            if self.helix_neighbor is not None:
+                neighbor_id = np.array([np.random.choice(lst, 1) for lst in self.helix_neighbor])
+
             for in_dict in self.data_generator:
-                self.train_step(in_dict, end_time=end_time)
+
+                y_gt = in_dict['y']
+                ind = in_dict['index']
+                neighbor_img = None
+                if self.helix_neighbor is not None:
+                    neighbor_select = neighbor_id[ind]
+                    if len(np.shape(neighbor_select)) == 2:
+                        neighbor_select = neighbor_select[:, 0]
+                    neighbor_select = torch.tensor(neighbor_select)
+                    neighbor_img = self.data[neighbor_select]
+                    neighbor_img['y'] = torch.from_numpy(neighbor_img['y'])
+                    neighbor_img['y_real'] = torch.from_numpy(neighbor_img['y_real'])
+
+                self.train_step(in_dict, end_time=end_time,neighbor_img=neighbor_img)
                 end_time = time.time()
 
             # image and pose summary
@@ -276,10 +303,12 @@ class Trainer:
                 self.save_volume()
                 self.save_model()
 
+            #print(f'epoch {epoch} finished in {dt.now() - t_epoch}')
+
         t_total = dt.now() - t_0
         log('Finished in {} ({} per epoch)'.format(t_total, t_total / self.num_epochs))
 
-    def train_step(self, in_dict, end_time):
+    def train_step(self, in_dict, end_time,neighbor_img=None):
         self.pose_only = False if self.total_images_count >= self.pose_only_phase else True
 
         self.time_dataloading.append(time.time() - end_time)
@@ -302,10 +331,19 @@ class Trainer:
 
         # forward pass
         latent_variables_dict, y_pred, y_gt_processed = self.forward_pass(in_dict)
+        if neighbor_img is not None:
+            for key in neighbor_img.keys():
+                neighbor_img[key] = neighbor_img[key].to(self.device)
+            latent_variables_dict_N, y_pred_N, y_gt_processed_N = self.forward_pass(neighbor_img)
 
         # loss
         start_time_loss = time.time()
-        total_loss, new_losses, activated_paths = self.loss(y_pred, y_gt_processed, latent_variables_dict)
+        if neighbor_img is not None:
+            total_loss, new_losses, activated_paths \
+                = self.loss_neighbor(y_pred, y_gt_processed, latent_variables_dict,
+                                     y_pred_N, y_gt_processed_N,latent_variables_dict_N)
+        else:
+            total_loss, new_losses, activated_paths = self.loss(y_pred, y_gt_processed, latent_variables_dict)
         self.time_loss.append(time.time() - start_time_loss)
 
         # backward pass
@@ -409,6 +447,74 @@ class Trainer:
 
         return total_loss, new_losses, activated_paths
 
+    def loss_neighbor(self, y_pred, y_gt, latent_variables_dict,y_pred_N, y_gt_N, latent_variables_dict_N,helix_loss='nce'):
+        """
+        y_pred: [(sym_loss_factor * ) batch_size, n_pts]
+        y_gt: [(sym_loss_factor * ) batch_size, D, D]
+        """
+        new_losses = {}
+        weight=1
+        batch_size,D=y_gt.shape
+        device = y_gt.device
+        # data loss
+        if self.sym_loss:
+            data_loss, activated_paths = symmetric_loss(y_pred, y_gt, self.sym_loss_factor)
+        else:
+            data_loss = F.mse_loss(y_pred, y_gt)
+            activated_paths = None
+
+
+        if self.sym_loss:
+            data_loss_N, activated_paths_N = symmetric_loss(y_pred_N, y_gt_N, self.sym_loss_factor)
+        else:
+            data_loss_N = F.mse_loss(y_pred_N, y_gt_N)
+            activated_paths_N = None
+
+        # add up two reconstruction loss
+        data_loss_all = (data_loss_N+data_loss)/2
+        new_losses['Data Loss'] = data_loss_all.item()
+
+        # KL divergence
+
+
+        # To make sure that the rotation of the R1 and R2 is on the same axis
+        R1=latent_variables_dict['R']
+        R2=latent_variables_dict_N['R']
+        R_diff=torch.bmm(R1,torch.transpose(R2,1,2))
+        regularization = torch.FloatTensor([0,0,1]).unsqueeze(0).expand(batch_size,-1)
+        loss_R1=F.mse_loss(R_diff[:,-1],regularization.to(device))
+        loss_R2=F.mse_loss(R_diff[:,:,-1],regularization.to(device))
+        loss_R = loss_R1
+        #loss_R=torch.tensor(0)
+        new_losses['Rotation regularization'] = loss_R.item()
+
+        # To make sure that the between the same filament as same as possible
+
+        z1=latent_variables_dict['z']
+        z2=latent_variables_dict_N['z']
+
+        if helix_loss is None:
+            loss_helix=F.mse_loss(z1,z2)
+        elif helix_loss=='nce':
+            loss_helix = nce_loss(z1, z2, device)
+
+
+        new_losses['helix_similar_loss'] = loss_helix.item()
+
+        #helix_loss=torch.tensor(0)
+
+        total_loss = data_loss_all + weight*(loss_R + loss_helix)
+        #total_loss=data_loss_all
+
+        if not self.use_kl_divergence:
+            total_loss = total_loss
+        else:
+            kld_conf = kl_divergence_conf(latent_variables_dict)
+            total_loss = total_loss + self.beta_conf * kld_conf / self.resolution ** 2
+            new_losses['KL Div. Conf.'] = kld_conf.item()
+
+        return total_loss, new_losses, activated_paths
+
     def test(self):
         with torch.no_grad():
             for in_dict in self.data_generator_test:
@@ -478,6 +584,7 @@ class Trainer:
         log('# [Train Epoch: {}/{}] [{}/{} images] data loss={:.4f}, loss={:.4f}'.format(
             self.epoch + 1, self.num_epochs, self.current_batch_images_count, self.n_img_dataset,
             data_loss, _total_loss))
+        log('all losses are '+''.join(f"{key}:{value} " for key, value in new_losses.items()))
 
         scalars = new_losses
         if hasattr(self.output_mask, 'current_radius'):
@@ -552,9 +659,10 @@ class Trainer:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('config', help='Config filename')
-    relative_config_path = os.path.join('configs/', parser.parse_args().config + '.json')
-    with open(os.path.join(main_dir, relative_config_path), 'r') as f:
+    #relative_config_path = os.path.join('configs/', parser.parse_args().config + '.json')
+    relative_config_path = parser.parse_args().config
+    with open(relative_config_path, 'r') as f:
         config = json.load(f)
     utils._verbose = False
-    trainer = Trainer(config)
+    trainer = Trainer(config,relative_config_path)
     trainer.train()
