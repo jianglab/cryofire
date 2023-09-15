@@ -150,6 +150,19 @@ class Trainer:
             'domain': args.hypervolume_domain
         }
         log("Initializing model...")
+
+        # helical args
+        if ('helical_path' in dir(args)) == False:
+            print('no helical path')
+            args.helical_path = None
+        self.helical_path = args.helical_path
+        self.helix_neighbor = None
+        if args.helical_path is not None:
+            self.helix_neighbor = np.load(args.helical_path, allow_pickle=True)
+        if self.helix_neighbor is not None:
+            helix_mode=True
+        else:
+            helix_mode = False
         self.model = CryoFIRE(
             self.lattice,
             self.output_mask,
@@ -159,7 +172,8 @@ class Trainer:
             no_trans=args.no_trans,
             sym_loss=args.sym_loss,
             sym_loss_factor=args.sym_loss_factor,
-            use_gt_poses=args.use_gt_poses
+            use_gt_poses=args.use_gt_poses,
+            helix_mode=False
         )
         log("Model initialized. Moving to GPU...")
         self.model.to(self.device)
@@ -213,12 +227,6 @@ class Trainer:
         if args.z_dim == 0 or not args.variational_het or args.beta_conf < 1e-8:
             self.use_kl_divergence = False
 
-        # helical args
-        self.helical_path = args.helical_path
-        self.helix_neighbor = None
-        if args.helical_path is not None:
-            self.helix_neighbor = np.load(args.helical_path, allow_pickle=True)
-
         # placeholders for predicted latent variables
         self.predicted_rots = np.empty((self.n_img_dataset, 3, 3))
         self.predicted_trans = np.empty((self.n_img_dataset, 2)) if not args.no_trans else None
@@ -251,6 +259,9 @@ class Trainer:
         t_0 = dt.now()
 
         self.predicted_rots = np.eye(3).reshape(1, 3, 3).repeat(self.n_img_dataset, axis=0)
+        if self.helix_neighbor is not None:
+            self.predicted_axis = np.zeros((self.n_img_dataset,3))
+            self.predicted_rot_axis = np.zeros((self.n_img_dataset,2))
         self.predicted_trans = np.zeros((self.n_img_dataset, 2)) if not self.no_trans else None
         self.predicted_act_paths = np.zeros((self.n_img_dataset, 1)) if self.sym_loss else None
         self.predicted_rots_full = np.eye(3).reshape(1, 1, 3, 3).repeat(
@@ -332,9 +343,18 @@ class Trainer:
         # forward pass
         latent_variables_dict, y_pred, y_gt_processed = self.forward_pass(in_dict)
         if neighbor_img is not None:
+            neighbor_img['R_axis']=latent_variables_dict['R_axis_o']
+            neighbor_img['z'] = latent_variables_dict['z']
             for key in neighbor_img.keys():
                 neighbor_img[key] = neighbor_img[key].to(self.device)
             latent_variables_dict_N, y_pred_N, y_gt_processed_N = self.forward_pass(neighbor_img)
+            neighbor_img.pop('R_axis')
+            neighbor_img.pop('z')
+
+            self.predicted_axis[ind] = latent_variables_dict['R_axis_o'].detach().cpu().numpy()
+            self.predicted_rot_axis[ind] = latent_variables_dict['R_rot_o'].detach().cpu().numpy()
+            #latent_variables_dict_N.pop('R_axis_o')
+        #latent_variables_dict.pop('R_axis_o')
 
         # loss
         start_time_loss = time.time()
@@ -418,9 +438,12 @@ class Trainer:
         latent_variables_dict = self.model.encode(in_dict, self.pose_only)
         self.time_encoder.append(time.time() - start_time_encoder)
         start_time_decoder = time.time()
+        latent_variables_dict_cp = latent_variables_dict.copy()
+        if 'z' in in_dict:
+            latent_variables_dict['z'] = in_dict['z']
         y_pred, y_gt_processed = self.model.decode(latent_variables_dict, ctf_local, in_dict['y'])
         self.time_decoder.append(time.time() - start_time_decoder)
-        return latent_variables_dict, y_pred, y_gt_processed
+        return latent_variables_dict_cp, y_pred, y_gt_processed
 
     def loss(self, y_pred, y_gt, latent_variables_dict):
         """
@@ -447,7 +470,7 @@ class Trainer:
 
         return total_loss, new_losses, activated_paths
 
-    def loss_neighbor(self, y_pred, y_gt, latent_variables_dict,y_pred_N, y_gt_N, latent_variables_dict_N,helix_loss='nce'):
+    def loss_neighbor(self, y_pred, y_gt, latent_variables_dict,y_pred_N, y_gt_N, latent_variables_dict_N,helix_loss=None):
         """
         y_pred: [(sym_loss_factor * ) batch_size, n_pts]
         y_gt: [(sym_loss_factor * ) batch_size, D, D]
@@ -485,8 +508,11 @@ class Trainer:
         loss_R1=F.mse_loss(R_diff[:,-1],regularization.to(device))
         loss_R2=F.mse_loss(R_diff[:,:,-1],regularization.to(device))
         loss_R = loss_R1
-        #loss_R=torch.tensor(0)
+
         new_losses['Rotation regularization'] = loss_R.item()
+
+        loss_R=torch.tensor(0)
+
 
         # To make sure that the between the same filament as same as possible
 
@@ -501,7 +527,7 @@ class Trainer:
 
         new_losses['helix_similar_loss'] = loss_helix.item()
 
-        #helix_loss=torch.tensor(0)
+        loss_helix=torch.tensor(0)
 
         total_loss = data_loss_all + weight*(loss_R + loss_helix)
         #total_loss=data_loss_all
@@ -620,7 +646,13 @@ class Trainer:
             out_pose_full = '{}/pose_full.{}.pkl'.format(self.outdir, self.epoch)
             with open(out_pose_full, 'wb') as f:
                 pickle.dump(self.predicted_rots_full, f)
-
+        if self.helix_neighbor is not None:
+            out_pose_axis = '{}/pose_axis.{}.pkl'.format(self.outdir, self.epoch)
+            with open(out_pose_axis, 'wb') as f:
+                pickle.dump(self.predicted_axis, f)
+            out_pose_rot_axis = '{}/pose_rot_axis.{}.pkl'.format(self.outdir, self.epoch)
+            with open(out_pose_rot_axis, 'wb') as f:
+                pickle.dump(self.predicted_rot_axis, f)
         if self.has_test_set:
             out_pose_test = '{}/pose_test.{}.pkl'.format(self.outdir, self.epoch)
             if self.no_trans:

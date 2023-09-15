@@ -27,7 +27,7 @@ def dict_to_args(config_dict):
     return args
 
 
-def generate_volume(config_dict, weights, resolution, outdir, z_pkl=None):
+def generate_volume(config_dict, weights, resolution, outdir, z_pkl=None,z_select=None):
     args = dict_to_args(config_dict)
 
     device = torch.device('cuda')
@@ -64,7 +64,8 @@ def generate_volume(config_dict, weights, resolution, outdir, z_pkl=None):
         no_trans=args.no_trans,
         sym_loss=args.sym_loss,
         sym_loss_factor=args.sym_loss_factor,
-        use_gt_poses=args.use_gt_poses
+        use_gt_poses=args.use_gt_poses,
+        helix_mode=False
     )
     model.to(device)
 
@@ -78,6 +79,8 @@ def generate_volume(config_dict, weights, resolution, outdir, z_pkl=None):
     if z_pkl is not None:
         with open(z_pkl, 'rb') as f:
             z = pickle.load(f)
+        if z_select is not None:
+            z = z[-int(z_select):-1]
 
     if z is None:
         log('Generating volume...')
@@ -99,13 +102,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('config', help='Config filename')
     parser.add_argument('--weights', required=True, help='Weights of the model (.pkl)')
-    parser.add_argument('--resolution', required=True, help='Resolution')
+    parser.add_argument('--resolution', required=True, type=int, help='Resolution')
     parser.add_argument('--out_dir', required=True, help='Output directory')
     parser.add_argument('--z', default=None, help='Latent z to be sampled (.pkl)')
+    parser.add_argument('--z_select', default=None, help='select number of z')
     arguments = parser.parse_args()
 
-    relative_config_path = os.path.join('configs/', arguments.config + '.json')
-    with open(os.path.join(main_dir, relative_config_path), 'r') as f:
+    relative_config_path = arguments.config
+    with open(relative_config_path, 'r') as f:
         config = json.load(f)
 
-    generate_volume(config, arguments.weights, arguments.resolution, arguments.out_dir, z_pkl=arguments.z)
+    generate_volume(config, arguments.weights, arguments.resolution, arguments.out_dir, z_pkl=arguments.z,z_select=arguments.z_select)

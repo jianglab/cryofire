@@ -20,7 +20,7 @@ log = utils.log
 
 class CryoFIRE(nn.Module):
     def __init__(self, lattice, output_mask, shared_cnn_params, conf_regressor_params, hyper_volume_params,
-                 no_trans=False, sym_loss=True, sym_loss_factor=4, use_gt_poses=False):
+                 no_trans=False, sym_loss=True, sym_loss_factor=4, use_gt_poses=False, helix_mode=False):
         """
         lattice: Lattice
         output_mask: Mask
@@ -52,6 +52,7 @@ class CryoFIRE(nn.Module):
 
         self.sym_loss = sym_loss
         self.no_trans = no_trans
+        self.helix_mode = helix_mode
         self.z_dim = conf_regressor_params['z_dim']
         self.variational_conf = conf_regressor_params['variational']
 
@@ -76,7 +77,7 @@ class CryoFIRE(nn.Module):
         self.use_gt_poses = use_gt_poses
         if not use_gt_poses:
             self.pose_regressor = PoseRegressor(self.shared_cnn.final_channels, self.shared_cnn.final_size, sym_loss,
-                                                sym_loss_factor, no_trans)
+                                                sym_loss_factor, no_trans, helix_mode)
         else:
             assert not sym_loss, "Symmetric loss must be de-activated when using gt poses"
             log("Will use gt poses")
@@ -131,7 +132,7 @@ class CryoFIRE(nn.Module):
 
         output: [(sym_loss_factor * ) batch_size, n_pts], [batch_size, n_pts]
         """
-        batch_size = ctf_local.shape[0]
+        batch_size = y_gt.shape[0]
         rots = latent_variables_dict['R']
         z = None
 
@@ -147,9 +148,10 @@ class CryoFIRE(nn.Module):
         y_pred = self.hypervolume(x, z)
 
         # apply ctf
-        if self.sym_loss:
-            ctf_local = self.image_duplicator(ctf_local)
-        y_pred = self.apply_ctf(y_pred, ctf_local)
+        if ctf_local is not None:
+            if self.sym_loss:
+                ctf_local = self.image_duplicator(ctf_local)
+            y_pred = self.apply_ctf(y_pred, ctf_local)
 
         # duplicate gt
         if self.sym_loss:
@@ -275,19 +277,25 @@ class SharedCNN(nn.Module):
 
 
 class PoseRegressor(nn.Module):
-    def __init__(self, channels, kernel_size, sym_loss, sym_loss_factor, no_trans):
+    def __init__(self, channels, kernel_size, sym_loss, sym_loss_factor, no_trans, helix_mode=False):
         """
         channels: int
         kernel_size: int
         sym_loss: bool
         sym_loss_factor: int
         no_trans: bool
+        helix_mode: bool
         """
         super(PoseRegressor, self).__init__()
         self.sym_loss = sym_loss
         self.sym_loss_factor = sym_loss_factor
         self.no_trans = no_trans
-        self.regressor_rotation = nn.Conv2d(channels, 6, kernel_size, padding='valid')
+        self.helix_mode = helix_mode
+        #print(helix_mode)
+        if helix_mode is True:
+            self.regressor_rotation = nn.Conv2d(channels, 5, kernel_size, padding='valid')
+        else:
+            self.regressor_rotation = nn.Conv2d(channels, 6, kernel_size, padding='valid')
         if not no_trans:
             self.regressor_translation = nn.Conv2d(channels, 2, kernel_size, padding='valid')
 
@@ -305,12 +313,24 @@ class PoseRegressor(nn.Module):
             t: [(sym_loss_factor * ) batch_size, 2]
         """
         in_size = shared_features.shape[0]
-        rots_s2s2 = self.regressor_rotation(shared_features).reshape(in_size, 6)
-        rots_matrix = lie_tools.s2s2_to_matrix(rots_s2s2)
+        if self.helix_mode is True:
+            rots_rar = self.regressor_rotation(shared_features).reshape(in_size, 5)
+            if 'R_axis' in in_dict:
+                R_axis = in_dict['R_axis']
+                rots_matrix = lie_tools.rar_to_matrix(R_axis, rots_rar[...,3:],axis_rel='z')
+            else:
+                rots_matrix = lie_tools.rar_to_matrix(rots_rar,axis_rel='z')
+                R_axis=rots_rar[...,0:3]
+        else:
+            rots_s2s2 = self.regressor_rotation(shared_features).reshape(in_size, 6)
+            rots_matrix = lie_tools.s2s2_to_matrix(rots_s2s2)
         pose_dict = {'R': rots_matrix}
         if not self.no_trans:
             trans = self.regressor_translation(shared_features).reshape(in_size, 2)
             pose_dict['t'] = trans
+        if self.helix_mode is True:
+            pose_dict['R_axis_o'] = rots_rar[...,0:3]
+            pose_dict['R_rot_o'] = rots_rar[...,3:]
         return pose_dict
 
 

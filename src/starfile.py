@@ -8,8 +8,8 @@ from datetime import datetime as dt
 import numpy as np
 import pandas as pd
 
-import mrc
-from mrc import LazyImage
+import src.mrc as mrc
+from src.mrc import LazyImage
 
 
 class Starfile:

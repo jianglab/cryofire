@@ -5,7 +5,7 @@ CTF
 import numpy as np
 import torch
 
-import utils
+from src import utils
 
 log = utils.log
 
@@ -43,7 +43,7 @@ def compute_ctf(freqs, dfu, dfv, defocus_angle, volt, cs, w, phase_shift=0, b_fa
     ctf = (1 - w ** 2) ** .5 * torch.sin(gamma) - w * torch.cos(gamma)
     if b_factor is not None:
         ctf *= torch.exp(-b_factor / 4 * s2)
-    return ctf
+    return -ctf
 
 
 def compute_ctf_np(freqs, dfu, dfv, defocus_angle, volt, cs, w, phase_shift=0, b_factor=None):
