@@ -80,8 +80,9 @@ def main(args):
 
     def downsample_in_batches(old, b):
         new = np.empty((len(old), D, D), dtype=np.float32)
-        for ii in range(math.ceil(len(old)/b)):
-            log(f'Processing batch {ii}')
+        nb = math.ceil(len(old)/b)
+        for ii in range(nb):
+            log(f'Processing batch {ii+1}/{nb}')
             new[ii*b:(ii+1)*b,:,:] = downsample_images(old[ii*b:(ii+1)*b])
         return new
 

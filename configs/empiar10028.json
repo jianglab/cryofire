@@ -40,6 +40,8 @@
     "z_dim": 8,
     "std_z_init": 3.0,
     "input_mask": "none",
+    "encoder_name": "default",
+    "encoder_pretrained": false,
 
     "hypervolume_layers": 3,
     "hypervolume_dim": 256,

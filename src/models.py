@@ -57,7 +57,7 @@ class CryoFIRE(nn.Module):
 
         # shared cnn
         self.shared_cnn = SharedCNN(self.D, shared_cnn_params['depth_cnn'], shared_cnn_params['channels_cnn'],
-                                    shared_cnn_params['kernel_size_cnn'], shared_cnn_params['mask_type'])
+                                    shared_cnn_params['kernel_size_cnn'], shared_cnn_params['mask_type'], encoder_name=shared_cnn_params['encoder_name'], encoder_pretrained=shared_cnn_params['encoder_pretrained'])
 
         # conformation regressor
         if self.z_dim > 0:
@@ -236,7 +236,7 @@ def sample_conf(z_mu, z_logvar):
 
 
 class SharedCNN(nn.Module):
-    def __init__(self, resolution, depth, channels, kernel_size, mask_type, nl=nn.ReLU):
+    def __init__(self, resolution, depth, channels, kernel_size, mask_type, nl=nn.ReLU, encoder_name="default", encoder_pretrained=False):
         """
         resolution: int
         depth: int
@@ -244,6 +244,30 @@ class SharedCNN(nn.Module):
         mask_type: str
         """
         super(SharedCNN, self).__init__()
+
+        if encoder_name != "default":
+            import timm # https://huggingface.co/docs/timm/index, https://timm.fast.ai/
+            available_models = sorted(timm.list_models())
+            assert encoder_name in available_models, f"ERROR: {encoder_name} is not a valid model name. Please choose a model from this list:\n{' '.join(available_models+['default'])}"
+            # based on https://github.com/huggingface/pytorch-image-models/blob/main/results/results-imagenet-real.csv
+            # small (<60M parameters) models with top1>0.9: caformer_m36 caformer_s36 convformer_m36 tf_efficientnetv2_m convformer_s36
+            # the default cryofire encoder is based on vgg16 (top1=0.8, 138M parameters)
+            # resolution = the size of HT (=real_space_image_size + 1)
+            # the input data to the encoder are the real space images (size = resolution-1)
+            try:
+                timm_model = timm.create_model(encoder_name, in_chans=1, pretrained=encoder_pretrained, num_classes=0, global_pool='')
+                tmp = timm_model(torch.randn(1, 1, resolution-1, resolution-1))
+            except:
+                timm_model = timm.create_model(encoder_name, in_chans=1, img_size=resolution-1, pretrained=encoder_pretrained, num_classes=0, global_pool='')
+                tmp = timm_model(torch.randn(1, 1, resolution-1, resolution-1))
+            if tmp.dim() != 4:
+                print(f"ERROR: {encoder_name} outputs a {tmp.dim()}-dimensional tensor, while a 4-dimensional tensor is expected. Please choose another model from this list:\n{' '.join(available_models+['default'])}")
+                sys.exit()
+
+            self.final_size = tmp.shape[-1]
+            self.final_channels = tmp.shape[1]
+            self.cnn = timm_model
+            return
 
         cnn = []
         in_channels = 1

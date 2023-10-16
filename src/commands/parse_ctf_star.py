@@ -8,7 +8,7 @@ import sys
 import os
 import pickle
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src import utils
 from src import starfile
 from src import ctf

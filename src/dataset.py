@@ -139,7 +139,12 @@ class MRCData(data.Dataset):
 
             # compute HT
             log('Computing FFT')
-            max_threads = min(max_threads, mp.cpu_count())
+            
+            import os
+            if "SLURM_JOB_CPUS_PER_NODE" in os.environ:
+                max_threads = int(os.environ["SLURM_JOB_CPUS_PER_NODE"])
+            else:
+                max_threads = min(max_threads, mp.cpu_count())
             if max_threads > 1:
                 log(f'Spawning {max_threads} processes')
                 with Pool(max_threads) as p:
@@ -192,8 +197,12 @@ class MRCData(data.Dataset):
             if window:
                 log(f'Windowing images with radius {window_r}')
                 particles_real_sample *= window_mask(ny, window_r, .99)
-
-            max_threads = min(max_threads, mp.cpu_count())
+            
+            import os
+            if "SLURM_JOB_CPUS_PER_NODE" in os.environ:
+                max_threads = int(os.environ["SLURM_JOB_CPUS_PER_NODE"])
+            else:
+                max_threads = min(max_threads, mp.cpu_count())
             log(f'Spawning {max_threads} processes')
             with Pool(max_threads) as p:
                 particles_sample = np.asarray(p.map(fft.ht2_center, particles_real_sample), dtype=np.float32)

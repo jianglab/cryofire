@@ -35,6 +35,8 @@ def dict_to_args(config_dict):
         setattr(args, key, value)
     if args.seed < 0:
         args.seed = np.random.randint(0, 10000)
+    args.outdir += f".{args.encoder_name}" if args.encoder_name != "default" else ""
+    args.outdir += ".pretrained" if args.encoder_pretrained else ""
     return args
 
 
@@ -43,14 +45,14 @@ class Trainer:
         args = dict_to_args(config_dict)
         log(args)
 
-        args.outdir = os.path.join(main_dir, args.outdir)
+        #args.outdir = os.path.join(main_dir, args.outdir)
         # output directory
         if args.outdir is not None and not os.path.exists(args.outdir):
             os.makedirs(args.outdir)
 
         # load poses
         if args.pose is not None:
-            assert os.path.exists(args.pose)
+            assert os.path.exists(args.pose), f"cannot find pose file {args.pose}"
 
         # set the random seed
         np.random.seed(args.seed)
@@ -88,6 +90,7 @@ class Trainer:
 
         # load ctf
         if args.ctf is not None:
+            assert os.path.exists(args.ctf), f"cannot find ctf file {args.ctf}"
             log('Loading ctf params from {}'.format(args.ctf))
             ctf_params = ctf.load_ctf_for_training(self.resolution - 1, args.ctf)
             if args.ind is not None:
@@ -122,7 +125,9 @@ class Trainer:
             'depth_cnn': args.depth_cnn,
             'channels_cnn': args.channels_cnn,
             'kernel_size_cnn': args.kernel_size_cnn,
-            'mask_type': args.input_mask
+            'mask_type': args.input_mask,
+            'encoder_name': args.encoder_name,
+            'encoder_pretrained': args.encoder_pretrained
         }
         # conformational encoder
         if args.z_dim > 0:
@@ -157,10 +162,11 @@ class Trainer:
             sym_loss_factor=args.sym_loss_factor,
             use_gt_poses=args.use_gt_poses
         )
+        self.model = torch.compile(self.model)
         log("Model initialized. Moving to GPU...")
         self.model.to(self.device)
         log(self.model)
-        log('{} parameters in model'.format(sum(p.numel() for p in self.model.parameters() if p.requires_grad)))
+        log('{:,} parameters in model'.format(sum(p.numel() for p in self.model.parameters() if p.requires_grad)))
 
         self.optim = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=args.wd)
 
@@ -250,7 +256,7 @@ class Trainer:
 
         self.total_batch_count = 0
         self.total_images_count = 0
-        for epoch in range(self.start_epoch, self.start_epoch + self.num_epochs):
+        for epoch in range(self.start_epoch, self.start_epoch + self.num_epochs +1):
             self.time_dataloading = []
             self.time_to_gpu = []
             self.time_ctf = []
@@ -552,8 +558,9 @@ class Trainer:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('config', help='Config filename')
-    relative_config_path = os.path.join('configs/', parser.parse_args().config + '.json')
-    with open(os.path.join(main_dir, relative_config_path), 'r') as f:
+    #relative_config_path = os.path.join('configs/', parser.parse_args().config + '.json')
+    #with open(os.path.join(main_dir, relative_config_path), 'r') as f:
+    with open(parser.parse_args().config + '.json', 'r') as f:
         config = json.load(f)
     utils._verbose = False
     trainer = Trainer(config)
